@@ -1,0 +1,10 @@
+from django.db import models
+from django.contrib.auth.models import AbstractUser
+
+
+class User(AbstractUser):
+    parent = models.ForeignKey('self', null=True, blank=True)
+    points = models.PositiveIntegerField(default=0)
+    email_verified = models.BooleanField(default=False)
+    confirmation_code = models.PositiveIntegerField(default=0)
+    #avatar = models.ImageField(null=True, blank=True)

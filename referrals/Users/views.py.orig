@@ -1,0 +1,63 @@
+import random
+
+from django.contrib.auth import get_user_model
+from django.contrib.auth.decorators import login_required
+from django.contrib.auth.views import login
+from django.contrib.sites.shortcuts import get_current_site
+from django.core.mail import EmailMessage
+from django.http import HttpResponse
+from django.shortcuts import render
+from django.template.loader import render_to_string
+from django.shortcuts import get_object_or_404
+
+from .forms import RegistrationForm
+
+
+@login_required
+def user_profile(request):
+    return render(request, 'Users/profile.html')
+
+
+def user_register(request):
+    User = get_user_model()
+    form = RegistrationForm(request.POST)
+
+    if request.method == 'POST':
+        if form.is_valid():
+            user = User.objects.create_user(
+                username=form.cleaned_data['username'],
+                password=form.cleaned_data['password1'],
+                email=form.cleaned_data['email'],
+                confirmation_code=str(random.randint(100000000, 999999999)))
+            user.is_active = False
+            user.save()
+
+            current_site = get_current_site(request)
+            mail_subject = 'Activate your account.'
+            message = render_to_string('Users/active_email.html', {
+                'user': user,
+                'domain': current_site.domain,
+                'confirmation_code': user.confirmation_code,
+                'user_pk': user.pk,
+            })
+            to_email = form.cleaned_data.get('email')
+            email = EmailMessage(mail_subject, message, to=[to_email])
+            email.send()
+            return HttpResponse('Please confirm your email address to complete the registration')
+
+    return render(request, 'Users/register.html', {'form': form})
+
+
+def user_activate(request, confirmation_code, user_pk):
+    User = get_user_model()
+    user = get_object_or_404(User, pk=user_pk)
+    code = user.confirmation_code
+
+    if user and confirmation_code == code:
+        user.is_active = True
+        user.email_verified = True
+        user.save()
+        login(request, user)
+        return HttpResponse('Thank you for your email confirmation. Now you can login your account.')
+    else:
+        return HttpResponse('Activation link is invalid!')
