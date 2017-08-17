@@ -4,6 +4,7 @@ from django.contrib.auth import get_user_model, authenticate, login
 from django.contrib.auth.decorators import login_required
 from django.contrib.sites.shortcuts import get_current_site
 from django.core.exceptions import ObjectDoesNotExist
+from django.db.utils import IntegrityError
 from django.core.mail import EmailMessage
 from django.http import HttpResponse
 from django.shortcuts import render, get_object_or_404, redirect
@@ -18,87 +19,90 @@ def user_profile(request):
     return render(request, 'Users/profile.html')
 
 
+def update_parent_points(points, user):
+    User = get_user_model()
+    if points == 0:
+        return
+    elif points == 1:
+        user.points += 1
+    else:
+        if not user.parent_id:
+            user.points += points
+        else:
+            parent_user = User.objects.get(id=user.parent_id)
+            user.points += + 1
+            points -= 1
+            update_parent_points(points, parent_user)
+
+    user.save()
+
+
+def send_mail(request, user, form):
+    current_site = get_current_site(request)
+    mail_subject = 'Activate your account.'
+    message = render_to_string('Users/active_email.html', {
+        'user': user.username,
+        'domain': current_site.domain,
+        'confirmation_code': user.confirmation_code,
+        'user_pk': user.pk,
+    })
+    to_email = form.cleaned_data.get('email')
+    email = EmailMessage(mail_subject, message, to=[to_email])
+    email.send()
+
+
 def user_register(request):
     User = get_user_model()
     form = RegistrationForm(request.POST or None, request.FILES or None)
-    count = User.objects.filter(without_invite_code=True).count()
+
+    if request.method != 'POST' or not form.is_valid():
+        return render(request, 'Users/register.html', {'form': form})
+
+    without_code_count = User.objects.filter(without_invite_code=True).count()
     invite_code = form['invite_code'].value()
+
+    if not invite_code and without_code_count >= 5:
+        form.add_error('invite_code', error='You need to get invite code')
+        return render(request, 'Users/register.html', {'form': form})
 
     if invite_code:
         invite_code = int(invite_code)
         try:
-            user = User.objects.get(invite_code=invite_code)
-            current_points = user.points
-            current_points = current_points + user.points + 1
-            user.points = current_points
-            user.save()
-            if user.ref_id != 0:
-                add_points(user.ref_id)
-            user.save()
-            create_user(request)
+            parent_user = User.objects.get(invite_code=invite_code)
 
         except ObjectDoesNotExist:
-            if request.method == 'POST' and form.is_valid():
-                form.add_error('invite_code', error='Your code is wrong')
+            form.add_error('invite_code', error='Your code is wrong')
+            return render(request, 'Users/register.html', {'form': form})
+
+        else:
+            children_count = User.objects.filter(parent_id=parent_user.id).count() + 1
+            try:
+                user = create_user(form, parent_id=parent_user.id)
+            except IntegrityError:
+                form.add_error('username', error='Username is used.')
                 return render(request, 'Users/register.html', {'form': form})
 
-    if not invite_code and count <= 5:
-        if request.method == 'POST' and form.is_valid():
-            user = User.objects.create_user(
-                username=form.cleaned_data['username'],
-                email=form.cleaned_data['email'],
-                avatar=form.cleaned_data['avatar'],
-                confirmation_code=random.randint(100000000, 999999999),
-                invite_code=random.randint(100000000, 999999999))
-            user.is_active = False
-            user.without_invite_code = 1
-            user.set_password(form.cleaned_data['password1'])
-            user.save()
+            update_parent_points(
+                children_count, parent_user)
 
-            current_site = get_current_site(request)
-            mail_subject = 'Activate your account.'
-            message = render_to_string('Users/active_email.html', {
-                'user': user,
-                'domain': current_site.domain,
-                'confirmation_code': user.confirmation_code,
-                'user_pk': user.pk,
-            })
-            to_email = form.cleaned_data.get('email')
-            email = EmailMessage(mail_subject, message, to=[to_email])
-            email.send()
+            user.save()
+            send_mail(request, user, form)
+
             return HttpResponse('Please confirm your email address to complete the registration')
 
-    elif not invite_code and count >= 5:
-        if request.method == 'POST' and form.is_valid():
-            form.add_error('invite_code', error='You need to get invite code')
+    elif not invite_code and without_code_count < 5:
+        try:
+            user = create_user(form)
+        except IntegrityError as e:
+            form.add_error('username', error=e.message)
+            return render(request, 'Users/register.html', {'form': form})
 
-    elif invite_code and count >= 5:
-        if request.method == 'POST' and form.is_valid():
-            user = User.objects.create_user(
-                username=form.cleaned_data['username'],
-                email=form.cleaned_data['email'],
-                avatar=form.cleaned_data['avatar'],
-                confirmation_code=random.randint(100000000, 999999999),
-                invite_code=random.randint(100000000, 999999999))
-            user.is_active = False
-            user.ref_id = User.objects.get(invite_code=invite_code).id
-            user.set_password(form.cleaned_data['password1'])
-            user.save()
+        user.without_invite_code = 1
 
-            current_site = get_current_site(request)
-            mail_subject = 'Activate your account.'
-            message = render_to_string('Users/active_email.html', {
-                'user': user,
-                'domain': current_site.domain,
-                'confirmation_code': user.confirmation_code,
-                'user_pk': user.pk,
-            })
-            to_email = form.cleaned_data.get('email')
-            email = EmailMessage(mail_subject, message, to=[to_email])
-            email.send()
-            return HttpResponse('Please confirm your email address to complete the registration')
+        user.save()
+        send_mail(request, user, form)
 
-    return render(request, 'Users/register.html', {'form': form})
+        return HttpResponse('Please confirm your email address to complete the registration')
 
 
 def user_activate(request, confirmation_code, user_pk):
@@ -159,52 +163,28 @@ def generate_code(request):
     return redirect('edit_profile')
 
 
-def create_user(request):
+def create_user(form, parent_id=None):
     User = get_user_model()
-    form = RegistrationForm(request.POST or None, request.FILES or None)
-    invite_code = form['invite_code'].value()
-    if request.method == 'POST' and form.is_valid():
-        user = User.objects.create_user(
-            username=form.cleaned_data['username'],
-            email=form.cleaned_data['email'],
-            avatar=form.cleaned_data['avatar'],
-            confirmation_code=random.randint(100000000, 999999999),
-            invite_code=random.randint(100000000, 999999999))
-        user.is_active = False
-        if invite_code:
-            ref_user = User.objects.get(invite_code=invite_code)
-            ref_id = ref_user.id
-            user.ref_id = ref_id
-        user.set_password(form.cleaned_data['password1'])
-        user.save()
+    user = User.objects.create_user(
+        username=form.cleaned_data['username'],
+        email=form.cleaned_data['email'],
+        avatar=form.cleaned_data['avatar'],
+        confirmation_code=random.randint(100000000, 999999999),
+        invite_code=random.randint(100000000, 999999999))
+    user.is_active = False
+    user.set_password(form.cleaned_data['password1'])
 
-        current_site = get_current_site(request)
-        mail_subject = 'Activate your account.'
-        message = render_to_string('Users/active_email.html', {
-            'user': user,
-            'domain': current_site.domain,
-            'confirmation_code': user.confirmation_code,
-            'user_pk': user.pk,
-        })
-        to_email = form.cleaned_data.get('email')
-        email = EmailMessage(mail_subject, message, to=[to_email])
-        email.send()
-        return HttpResponse('Please confirm your email address to complete the registration')
+    if parent_id is not None:
+        user.parent_id = parent_id
 
-
-def add_points(ref_id):
-    referral = User.objects.get(id=ref_id)
-    current_points = referral.points
-    referral.points = current_points + 1
-    referral.save()
-
-    if referral.ref_id != 0:
-        add_points(referral.ref_id)
-    else:
-        return True
+    return user
 
 
 @login_required
 def top_ten(request):
-    top = User.objects.all().order_by('-points')[:10]
+    top = User.objects.all().order_by('-points')
+    top = filter(
+        lambda x: x.points > 0, top[:10]
+    )
+
     return render(request, 'Users/top_ten.html', {'top': top})

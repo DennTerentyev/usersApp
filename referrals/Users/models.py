@@ -10,7 +10,7 @@ class User(AbstractUser):
     avatar = models.ImageField(blank=True)
     invite_code = models.PositiveIntegerField(null=True, unique=True)
     without_invite_code = models.BooleanField(default=False)
-    ref_id = models.IntegerField(default=0)
+    # ref_id = models.IntegerField(default=0)
 
     # def save(self, *args, **kwargs):
     #     try:
@@ -30,13 +30,13 @@ class User(AbstractUser):
             return User.objects.get(id=self.ref_id)
         else:
             return False
-    #
-    # @property
-    # def has_inviter(self):
-    #     if self.ref_id:
-    #         return True
-    #     else:
-    #         return False
-    #
-    # def get_inviter(self):
-    #     return User.objects.get(id=self.ref_id)
+
+    @property
+    def has_inviter(self):
+        if self.ref_id:
+            return True
+        else:
+            return False
+
+    def get_inviter(self):
+        return User.objects.get(id=self.ref_id)
